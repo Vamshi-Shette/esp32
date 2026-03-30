@@ -1,130 +1,117 @@
 #include <WiFi.h>
-#include <HTTPClient.h>
+#include "ThingSpeak.h"
 #include "time.h"
 
-// -------- WIFI --------
-const char* ssid = "vamshi";
+const char* ssid     = "vamshi";
 const char* password = "11111111";
 
-// -------- THINGSPEAK --------
-String apiKey = "YOUR_API_KEY";   // replace
-String server = "http://api.thingspeak.com/update";
+unsigned long myChannelNumber = 3316385;   
+const char * myWriteAPIKey = "OK6GHM4WOW1W1HWB"; 
 
-// -------- ULTRASONIC --------
 #define TRIG 5
-#define ECHO 18
+#define ECHO 21
 
-bool personInside = false;
-int personCount = 0;
-
-long duration;
-float distance;
-
-// -------- NTP --------
 const char* ntpServer = "pool.ntp.org";
-const long gmtOffset_sec = 19800;
+const long  gmtOffset_sec = 19800; // IST
+const int   daylightOffset_sec = 0;
 
-// ================= TIME =================
-String getTimeString() {
+WiFiClient client;
+int totalPersons = 0;
+bool personInside = false;
+String entryTimeStr = "";
+String exitTimeStr = "";
+String personLabel = "";
+unsigned long lastUploadTime = 0;
+const unsigned long uploadInterval = 16000; 
+bool dataPending = false;
+
+String getTimeString() 
+{
   struct tm timeinfo;
-
-  if (!getLocalTime(&timeinfo)) return "Error";
-
+  if (!getLocalTime(&timeinfo)) 
+    return "Time Error";
   char buffer[30];
   strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &timeinfo);
-
   return String(buffer);
 }
 
-// ================= DISTANCE =================
-float getDistance() {
+float getDistance() 
+{
   digitalWrite(TRIG, LOW);
   delayMicroseconds(2);
-
   digitalWrite(TRIG, HIGH);
   delayMicroseconds(10);
   digitalWrite(TRIG, LOW);
-
-  duration = pulseIn(ECHO, HIGH);
+  long duration = pulseIn(ECHO, HIGH, 30000);
+  if (duration == 0) 
+    return 400;
   return duration * 0.034 / 2;
 }
 
-// ================= SEND TO CLOUD =================
-void sendToCloud(String person, String entry, String exitTime) {
-
-  if (WiFi.status() == WL_CONNECTED) {
-
-    HTTPClient http;
-
-    String url = server + "?api_key=" + apiKey +
-                 "&field1=" + person +
-                 "&field2=" + entry +
-                 "&field3=" + exitTime;
-
-    http.begin(url);
-    int httpCode = http.GET();
-
-    Serial.print("HTTP Response: ");
-    Serial.println(httpCode);
-
-    http.end();
-  }
-}
-
-// ================= SETUP =================
 void setup() {
   Serial.begin(115200);
-
   pinMode(TRIG, OUTPUT);
   pinMode(ECHO, INPUT);
 
-  // WiFi connect
   WiFi.begin(ssid, password);
-  Serial.print("Connecting...");
-
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
+  while (WiFi.status() != WL_CONNECTED) 
+  { 
+    delay(500); 
+    Serial.print("."); 
   }
-
-  Serial.println("\nConnected!");
-
-  // NTP
-  configTime(gmtOffset_sec, 0, ntpServer);
-  delay(2000);
+  
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+  struct tm timeinfo;
+  while (!getLocalTime(&timeinfo)) 
+  { 
+    delay(500); 
+    Serial.print("Syncing..."); 
+  }
+  Serial.println("\nWiFi Connected & Time Synced!");
+  ThingSpeak.begin(client);
 }
 
-// ================= LOOP =================
-void loop() {
-
+void loop() 
+{
   float distance = getDistance();
 
-  static String entryTime = "";
-
-  // ENTRY
-  if (distance < 5 && !personInside) {
+  // ENTRY DETECTION
+  if (distance > 1 && distance < 5 && !personInside) 
+  {
     personInside = true;
-    entryTime = getTimeString();
-
-    Serial.println("Entry: " + entryTime);
+    totalPersons++;
+    personLabel = "Person " + String(totalPersons);
+    entryTimeStr = getTimeString();
+    Serial.println("\n>>> " + personLabel + " Entered at: " + entryTimeStr);
   }
 
-  // EXIT
-  if (distance > 10 && personInside) {
+  if (distance > 10 && personInside) 
+  {
     personInside = false;
-
-    String exitTime = getTimeString();
-    personCount++;
-
-    Serial.println("Exit: " + exitTime);
-
-    // SEND TO CLOUD
-    sendToCloud(
-      "Person" + String(personCount),
-      entryTime,
-      exitTime
-    );
+    exitTimeStr = getTimeString();
+    Serial.println(">>> " + personLabel + " Exited at: " + exitTimeStr);
+    dataPending = true; // Queue the full log
   }
 
-  delay(200);
+  if (dataPending && (millis() - lastUploadTime >= uploadInterval)) 
+  {
+    ThingSpeak.setField(1, personLabel);
+    ThingSpeak.setField(2, entryTimeStr);
+    ThingSpeak.setField(3, exitTimeStr);
+
+    int x = ThingSpeak.writeFields(myChannelNumber, myWriteAPIKey);
+
+    if (x == 200) {
+      Serial.println(">>> ThingSpeak Update Successful.");
+      dataPending = false;
+      lastUploadTime = millis();
+    } 
+    else 
+    {
+      Serial.println(">>> Update Error: " + String(x));
+      lastUploadTime = millis() - 11000; 
+    }
+  }
+
+  delay(100);
 }
